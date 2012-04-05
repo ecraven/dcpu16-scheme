@@ -3,6 +3,12 @@ A basic implementation of an assembler for the DCPU16 in Scheme. Works on Petite
 
 Run =(hexdump <scheme-assembly-code>)= to generate a dumpfile.
 
+* Special Features
+- Correctly produces short or long opcodes for jumps (and everything else) [most of the time, not tested extensively]
+
+* Next Steps
+Write a simple Scheme compiler that targets this assembly language.
+
 * Syntax
 Very similar to Notch's syntax, but Schemey.. Look at the provided example programs.
 

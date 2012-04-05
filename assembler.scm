@@ -147,9 +147,11 @@
 			(else
 			 (raise-error "cannot reference: ~a" param)))))
 	       ((eq? (car param) 'relative)
-		(list #x1f (list 'relative (cadr param) high-or-low #f #f))) ;; internal? offset
+		(if (symbol? (cadr param))
+		    (list #x1f (list 'relative (cadr param) high-or-low #f #f))
+		    (raise-error "not a literal: ~a" (cadr param)))) ;; internal? offset
 	       (else
-		(raise-error  "unknown param type: ~a" (car param)))))
+		(raise-error  "unknown param type: ~a" param))))
 	((number? param)
 	 (if (<= param #x1f)
 	     (+ #x20 param)

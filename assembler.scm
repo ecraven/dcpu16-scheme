@@ -27,9 +27,11 @@
 (define (register-indirect reg)
   (cadr (caddr reg)))
 
-(define (register-indirect-offset reg offset)
+(define (register-indirect-offset reg offset high-or-low)
   (list (cadr (cadddr reg))
-	offset))
+	(if (number? offset)
+	    offset
+	    (list 'absolute offset #f #f #f))))
 
 (define-record-type opcode (fields name type opcode cycle-cost))
 
@@ -59,15 +61,24 @@
 	#f)))
 
 (define (assemble-one instruction)
-  (if (symbol? instruction)
-      `(,instruction)
-      (let* ((op (car instruction))
-	     (op-data (find-opcode op)))
-	(if (not op-data)
-	    (raise-error "unknown op code: ~a" op))
-	(if (eq? 'basic (opcode-type op-data))
-	    (assemble-basic instruction op-data)
-	    (assemble-non-basic instruction op-data)))))
+  (cond ((symbol? instruction) ;; label
+	 `(,instruction))
+	((and (number? instruction)
+	      (not (negative? instruction))
+	      (< instruction #x10000)) ;; int
+	 `(,instruction))
+	((string? instruction)
+	 (map char->integer (string->list instruction)))
+	((pair? instruction)
+	 (let* ((op (car instruction))
+		(op-data (find-opcode op)))
+	   (if (not op-data)
+	       (raise-error "unknown op code: ~a" op))
+	   (if (eq? 'basic (opcode-type op-data))
+	       (assemble-basic instruction op-data)
+	       (assemble-non-basic instruction op-data))))
+	(else
+	 (raise-error "unknown instruction: ~a" instruction))))
 
 (define (operand instruction n)
   (if (<= (+ 1 (length instruction)) n)
@@ -119,20 +130,18 @@
 			 (list #x1e (cadr param)))
 			((and (list? (cadr param))
 			      (eq? '+ (caadr param)))
-			 ;; (ref (+ x lit))
+			 ;; (ref (+ x lit))  or  (ref (+ x label))
 			 (let* ((operands (cdadr param))
 				(op-a (car operands))
 				(op-b (cadr operands)))
-			   (if (or (and (number? op-a)
-					(symbol? op-b))
-				   (and (symbol? op-a)
-					(number? op-b)))
-			       (let ((op-a-reg (find-register op-a))
-				     (op-b-reg (find-register op-b)))
-				 (if op-a-reg
-				     (register-indirect-offset op-a-reg op-b)
-				     (register-indirect-offset op-b-reg op-a)))
-			       (raise-error "illegal indirect offset: ~a" operands))))
+			   (let ((op-a-reg (find-register op-a))
+				 (op-b-reg (find-register op-b)))
+			     (cond (op-a-reg
+				    (register-indirect-offset op-a-reg op-b high-or-low))
+				   (op-b-reg
+				    (register-indirect-offset op-b-reg op-a high-or-low))
+				   (else
+				    (raise-error "illegal indirect offset: ~a" operands))))))
 			(else
 			 (raise-error #f "cannot reference: ~a" param)))))
 	       ((eq? (car param) 'relative)
@@ -187,12 +196,13 @@
 		       ((and (list? instr)
 			     (eq? (car instr) 'absolute))
 			(let* ((label (cadr instr))
+			       (fixup? (list-ref instr 2))
 			       (internal? (list-ref instr 3))
 			       (index (label-index lst label))
-			       (new-type (<= index #x1f)))
-			  (if (not (eq? new-type internal?))
+			       (new-internal? (and fixup? (<= index #x1f))))
+			  (if (not (eq? new-internal? internal?))
 			      (begin
-				(set-car! (cdddr instr) new-type)
+				(set-car! (cdddr instr) new-internal?)
 				(set! changes #t)))
 			  (set-car! (cddddr instr) index)))
 		       ((and (list? instr)
@@ -280,6 +290,25 @@
 	      (add i 1)
 	      (ifg 10 i)
 	      (sub pc (relative loop))))
+
+(define video-output 
+  '((set a #xbeef)
+    (set (ref #x1000) a)
+    (ifn a (ref #x1000))
+    (set pc end)
+    (set i 0)
+    nextchar
+    (ife (ref (+ data i)) 0)
+    (set pc end)
+    (set (ref (+ #x8000 i)) (ref (+ data i)))
+    (add i 1)
+    (set pc nextchar)
+    data
+    "Hello World!"
+    0
+    end
+    (sub pc 1)))
+
 (define test (assemble test-program))
 
 

@@ -128,6 +128,8 @@
 			 (register-indirect reg))
 			((number? (cadr param))
 			 (list #x1e (cadr param)))
+			((symbol? (cadr param))
+			 (list #x1e (list 'absolute (cadr param) #f #f #f)))
 			((and (list? (cadr param))
 			      (eq? '+ (caadr param)))
 			 ;; (ref (+ x lit))  or  (ref (+ x label))
@@ -143,7 +145,7 @@
 				   (else
 				    (raise-error "illegal indirect offset: ~a" operands))))))
 			(else
-			 (raise-error #f "cannot reference: ~a" param)))))
+			 (raise-error "cannot reference: ~a" param)))))
 	       ((eq? (car param) 'relative)
 		(list #x1f (list 'relative (cadr param) high-or-low #f #f))) ;; internal? offset
 	       (else
@@ -309,6 +311,22 @@
     end
     (sub pc 1)))
 
+(define read-input '((set push i)
+		     (set i (ref keypointer))
+		     (add i #x9000)
+		     (set target (ref i))
+		     (ife target 0)
+		     (set pc end)
+		     (set (ref i) 0)
+		     (add (ref keypointer) 1)
+		     (and (ref keypointer) #xf)
+		     end
+		     (set i pop)
+		     0
+		     keypointer
+		     0
+		     target 
+		     0))
 (define test (assemble test-program))
 
 

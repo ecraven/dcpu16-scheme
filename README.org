@@ -1,0 +1,44 @@
+* DCPU16-Scheme
+A basic implementation of an assembler for the DCPU16 in Scheme. Works on Petite Chez Scheme, might work on other R6RS Schemes.
+
+Run =(hexdump <scheme-assembly-code>)= to generate a dumpfile.
+
+* Syntax
+Very similar to Notch's syntax, but Schemey.. Look at the provided example programs.
+
+(set a #x30)
+(set (ref #x1000) #x20)
+(sub a (ref #x1000))
+(ifn a #x10)
+(set pc crash)
+(set i 10)
+(set a #x2000)
+loop
+(set (ref (+ i #x2000)) (ref a))
+(sub i 1)
+(ifn i 0)
+;; this would be better than the actual jump
+; (sub pc (relative loop))
+(set pc loop)
+(set x #x4)
+(jsr testsub)
+(set pc crash)
+testsub
+(shl x 4)
+(set pc pop)
+crash
+(set pc crash)
+
+** Fibonacci example
+
+(set a 0)
+(set b 1)
+(set i 0)
+loop
+(add a b)
+(set x a)
+(set a b)
+(set b x)
+(add i 1)
+(ifg 10 i)
+(sub pc (relative loop))

@@ -1,3 +1,5 @@
+;; add jmp, nop
+
 (define (raise-error . params)
   (error #f (apply format #f params)))
 
@@ -54,31 +56,64 @@
     (ifb ,(make-opcode 'ifb 'basic #xf 2))		   ;; plus 1 cost if the test fails
     (jsr ,(make-opcode 'jsr 'non-basic #x01 2))))
 
+(define +macros+
+  `(((nop) (set a a))
+    ((jmp target) (set pc target))
+    ((jb target) (sub pc (relative target)))
+    ((jf target) (add pc (relative target)))
+    ((brk) 0)))
+
 (define (find-opcode name)
   (let ((data (assq name +opcodes+)))
     (if data 
 	(cadr data)
 	#f)))
 
+(define (find-macro-parameter-mapping macro instruction)
+  (if (null? macro)
+      '()
+      (cons (cons (car macro) (car instruction)) (find-macro-parameter-mapping (cdr macro) (cdr instruction)))))
+
+(define (expand-parameters-in-macro expansion params)
+  (map (lambda (x) (if (list? x) (expand-parameters-in-macro x params) 
+		  (let ((exp (assq x params))) (if exp (cdr exp) x)))) expansion))
+
+(define (expand-macro-with-pattern instruction macro expansion)
+  (let ((params (find-macro-parameter-mapping (cdr macro) (cdr instruction))))
+    (expand-parameters-in-macro expansion params)))
+
+(define (macro-expand instruction)
+  (if (list? instruction)
+      (let* ((op (car instruction))
+	     (macro (find (lambda (x) (eq? (caar x) op)) +macros+)))
+	(if macro
+	    (let ((macro-expansion (cadr macro)))
+	      (if (null? (cdar macro)) ;; no parameters
+		  macro-expansion
+		  (expand-macro-with-pattern instruction (car macro) macro-expansion)))
+	    instruction))
+      instruction))
+
 (define (assemble-one instruction)
-  (cond ((symbol? instruction) ;; label
-	 `(,instruction))
-	((and (number? instruction)
-	      (not (negative? instruction))
-	      (< instruction #x10000)) ;; int
-	 `(,instruction))
-	((string? instruction)
-	 (map char->integer (string->list instruction)))
-	((pair? instruction)
-	 (let* ((op (car instruction))
-		(op-data (find-opcode op)))
-	   (if (not op-data)
-	       (raise-error "unknown op code: ~a" op))
-	   (if (eq? 'basic (opcode-type op-data))
-	       (assemble-basic instruction op-data)
-	       (assemble-non-basic instruction op-data))))
-	(else
-	 (raise-error "unknown instruction: ~a" instruction))))
+  (let ((instruction (macro-expand instruction)))
+    (cond ((symbol? instruction) ;; label
+	   `(,instruction))
+	  ((and (number? instruction)
+		(not (negative? instruction))
+		(< instruction #x10000)) ;; int
+	   `(,instruction))
+	  ((string? instruction)
+	   (map char->integer (string->list instruction)))
+	  ((pair? instruction)
+	   (let* ((op (car instruction))
+		  (op-data (find-opcode op)))
+	     (if (not op-data)
+		 (raise-error "unknown op code: ~a" op))
+	     (if (eq? 'basic (opcode-type op-data))
+		 (assemble-basic instruction op-data)
+		 (assemble-non-basic instruction op-data))))
+	  (else
+	   (raise-error "unknown instruction: ~a" instruction)))))
 
 (define (operand instruction n)
   (if (<= (+ 1 (length instruction)) n)
@@ -238,8 +273,12 @@
     (+ (bitwise-and (bitwise-not mask) instruction) 
        (bitwise-arithmetic-shift-left (+ #x20 immediate) shift))))
 
-(define (hexdump lst)
-  (for-each (lambda (x) (display x) (newline)) (pa lst)))
+(define (hexdump lst . file)
+  (if (null? file)
+      (for-each (lambda (x) (display x) (newline)) (pa lst))
+      (with-output-to-file (car file)
+	(lambda () 
+	  (for-each (lambda (x) (display x) (newline)) (pa lst))))))
 
 (define (incorporate-labels lst)
   (let loop ((lst lst)
@@ -283,17 +322,19 @@
       (set pc pop)
       crash
       (set pc crash)))
-(define foo '((set a 0)
-	      (set b 1)
-	      (set i 0)
-	      loop
-	      (add a b)
-	      (set x a)
-	      (set a b)
-	      (set b x)
-	      (add i 1)
-	      (ifg 10 i)
-	      (sub pc (relative loop))))
+
+(define fibonacci '((set a 0)
+		    (set b 1)
+		    (set i 0)
+		    loop
+		    (add a b)
+		    (set x a)
+		    (set a b)
+		    (set b x)
+		    (add i 1)
+		    (ifg 15 i)
+		    (jb loop)
+		    (brk)))
 
 (define video-output 
   '((set a #xbeef)
@@ -318,18 +359,17 @@
 		     (add i #x9000)
 		     (set target (ref i))
 		     (ife target 0)
-		     (set pc end)
+;		     (set pc end)
+		     (jf end)
 		     (set (ref i) 0)
 		     (add (ref keypointer) 1)
 		     (and (ref keypointer) #xf)
 		     end
 		     (set i pop)
-		     0
+		     (brk)
 		     keypointer
 		     0
 		     target 
 		     0))
-(define test (assemble test-program))
-
 
 ;; foo: add PC, 1 (7dc2 0001)   ->  PC is foo+3

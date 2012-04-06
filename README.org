@@ -1,7 +1,7 @@
 * DCPU16-Scheme
 A basic implementation of an assembler for the DCPU16 in Scheme. Works on Petite Chez Scheme, might work on other R6RS Schemes.
 
-Run =(hexdump <scheme-assembly-code>)= to generate a dumpfile.
+Run =(hexdump <scheme-assembly-code> <filename>)= to generate a dumpfile, omit the filename to see the dump.
 
 * Special Features
 - Correctly produces short or long opcodes for jumps (and everything else) [most of the time, not tested extensively]
@@ -48,3 +48,14 @@ Very similar to Notch's syntax, but Schemey.. Look at the provided example progr
 : (add i 1)
 : (ifg 10 i)
 : (sub pc (relative loop))
+* Macros
+There is a simple macro pattern facility, predefined macros are:
+
+: (jmp target)   ->  (set pc target)
+: (brk)  ->  0 (illegal instruction)
+: (jb target)  ->  (sub pc (relative target))
+: (jf target)  ->  (add pc (relative target))
+: (nop)  ->  (set a a)
+
+Add your own to =+macros+=.
+

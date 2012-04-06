@@ -61,6 +61,9 @@
     ((jmp target) (set pc target))
     ((jb target) (sub pc (relative target)))
     ((jf target) (add pc (relative target)))
+    ((push value) (set push value))
+    ((pop target) (set target pop))
+    ((call target) (jsr target))
     ((brk) 0)))
 
 (define (find-opcode name)

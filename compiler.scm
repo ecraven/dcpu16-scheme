@@ -49,9 +49,9 @@
   (emit '(add a pop)))
 
 (define-primitive (fx- si env arg1 arg2)
-  (emit-expr si env arg1)
-  (emit '(push a))
   (emit-expr si env arg2)
+  (emit '(push a))
+  (emit-expr si env arg1)
   (emit '(sub a pop)))
 
 (define-primitive (fx< si env arg1 arg2)
@@ -64,6 +64,16 @@
   (emit `(set c ,special/false))
   (emit `(ifg a b))
   (emit `(set c ,special/false))
+  (emit `(set a c)))
+
+(define-primitive (fx= si env arg1 arg2)
+  (emit-expr si env arg2)
+  (emit `(push a))
+  (emit-expr si env arg1)
+  (emit `(pop b))
+  (emit `(set c ,special/false))
+  (emit `(ife a b))
+  (emit `(set c ,special/true))
   (emit `(set a c)))
 
 (define (primitive? x)
@@ -79,12 +89,44 @@
   (cond ((immediate? expr) (emit-immediate expr))
 	((primcall? expr) (emit-primcall si env expr))
 	((if? expr) (emit-if si env expr))
+	((let? expr) (emit-let si env expr))
 	(else (raise-error "unknown expression: ~a" expr))))
+
+
+(define (emit-let si env expr)
+  (let loop ((bindings (let-bindings expr))
+	     (si si)
+	     (new-env env))
+    (cond ((null? bindings)
+	   (emit-expr si new-env (let-body expr)))
+	  (else
+	   (let ((b (car bindings)))
+	     (emit-expr si env (rhs b))
+	     (emit-stack-save si)
+	     (format #t "new binding: ~a ~a~%" (lhs b) si)
+	     (loop (cdr bindings)
+		   (next-stack-index si)
+		   (extend-env new-env (lhs b) si)))))))
+
+(define (extend-env env key value)
+  (cons (cons key value) env))
 
 (define (compile-program form)
   (set! *result* '())
-  (emit-expr 0 #f form)
+  (emit-expr (- word-size) '() form)
   (reverse *result*))
+
+(define (let? expr)
+  (and (list? expr)
+       (eq? (car expr) 'let)))
+(define lhs car)
+(define rhs cadr)
+(define let-bindings cadr)
+(define let-body caddr) ;; TODO: beginify
+(define (next-stack-index si)
+  (- si word-size))
+
+(define word-size 1)
 
 (define (if? expr)
   (and (list? expr)
@@ -95,6 +137,13 @@
     (lambda ()
       (set! count (+ count 1))
       (string->symbol (string-append "label-" (number->string count))))))
+
+;; these assume z is set correctly
+(define (emit-stack-save si)
+  (emit `(set (ref (+ z ,si)) a)))
+
+(define (emit-stack-load si)
+  (emit `(set a (ref (+ z ,si)))))
 
 (define (emit-if si env expr)
   (let ((alt-label (unique-label))

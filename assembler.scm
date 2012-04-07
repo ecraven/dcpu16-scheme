@@ -201,10 +201,10 @@
   (apply append lst))
 
 (define (assemble lst)
-  (flatten-once (map assemble-one lst)))
+  (incorporate-labels (fixup-labels   (flatten-once (map assemble-one lst)))))
 
 (define (pa lst)
-  (map (lambda (x) (if (number? x) (format #f "~x" x) x)) (incorporate-labels (fixup-labels (assemble lst)))))
+  (map (lambda (x) (if (number? x) (format #f "~x" x) x)) (assemble lst)))
 
 (define (label-index lst lbl)
   (let loop ((lst lst)
@@ -303,76 +303,6 @@
 		       (loop (cdr lst) result))
 		     (loop (cdr lst) (cons offset result)))))))))
 
-(define test-program '((set a #x30)
-      (set (ref #x1000) #x20)
-      (sub a (ref #x1000))
-      (ifn a #x10)
-      (set pc crash)
-      (set i 10)
-      (set a #x2000)
-      loop
-      (set (ref (+ i #x2000)) (ref a))
-      (sub i 1)
-      (ifn i 0)
-;; trying this
-      (sub pc (relative loop))
-;      (set pc loop)
-      (set x #x4)
-      (jsr testsub)
-      (set pc crash)
-      testsub
-      (shl x 4)
-      (set pc pop)
-      crash
-      (set pc crash)))
 
-(define fibonacci '((set a 0)
-		    (set b 1)
-		    (set i 0)
-		    loop
-		    (add a b)
-		    (set x a)
-		    (set a b)
-		    (set b x)
-		    (add i 1)
-		    (ifg 15 i)
-		    (jb loop)
-		    (brk)))
-
-(define video-output 
-  '((set a #xbeef)
-    (set (ref #x1000) a)
-    (ifn a (ref #x1000))
-    (set pc end)
-    (set i 0)
-    nextchar
-    (ife (ref (+ data i)) 0)
-    (set pc end)
-    (set (ref (+ #x8000 i)) (ref (+ data i)))
-    (add i 1)
-    (set pc nextchar)
-    data
-    "Hello World!"
-    0
-    end
-    (sub pc 1)))
-
-(define read-input '((set push i)
-		     (set i (ref keypointer))
-		     (add i #x9000)
-		     (set target (ref i))
-		     (ife target 0)
-;		     (set pc end)
-		     (jf end)
-		     (set (ref i) 0)
-		     (add (ref keypointer) 1)
-		     (and (ref keypointer) #xf)
-		     end
-		     (set i pop)
-		     (brk)
-		     keypointer
-		     0
-		     target 
-		     0))
 
 ;; foo: add PC, 1 (7dc2 0001)   ->  PC is foo+3

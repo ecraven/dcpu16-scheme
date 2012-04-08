@@ -1,5 +1,21 @@
+#| 
+loophole: 
+- remove (ret) after (jmp _)
+- remove (set a a)
+|#
+
+;;; the following register *must* match assembler.scm!
+(define +data-stack-register+ 'j)
+
 (define (raise-error . params)
   (error #f (apply format #f params)))
+
+(define (reset-virtual-registers!)
+  (set! *first-virtual-register* 0))
+(define *first-virtual-register* 0)
+(define (new-virtual-register)
+  (set! *first-virtual-register* (+ 1 *first-virtual-register*))
+  (string->symbol (format #f "vr-~a" *first-virtual-register*)))
 
 (define fixnum-tag #b00)
 (define fixnum-tag-mask #b11)
@@ -24,13 +40,18 @@
        (not (null? expr))
        (primitive? (car expr))))
 
+(define (call? expr)
+  (and (list? expr)
+       (not (null? expr))
+       (not (primitive? (car expr)))))
+
 (define *primitives* (make-hash-table))
 
 (define-syntax define-primitive
   (syntax-rules ()
-    ((_ (prim-name si arg* ...) b b* ...)
+    ((_ (prim-name target si tail-position? arg* ...) b b* ...)
      (begin
-       (hashtable-set! *primitives* 'prim-name (make-primitive 'prim-name (length '(arg* ...)) (lambda (si arg* ...) b b* ...)))))))
+       (hashtable-set! *primitives* 'prim-name (make-primitive 'prim-name (length '(arg* ...)) (lambda (target si tail-position? arg* ...) b b* ...)))))))
 
 (define (make-primitive name args emitter)
   (list '*primitive* name args emitter))
@@ -38,91 +59,158 @@
 (define (primitive-emitter prim)
   (list-ref (hashtable-ref *primitives* prim #f) 3))
 
-(define-primitive (fxadd1 si env arg)
-  (emit-expr si env arg)
-  (emit `(add a ,(immediate-rep 1))))
-
-(define-primitive (fx+ si env arg1 arg2)
-  (emit-expr si env arg1)
-  (emit '(push a))
-  (emit-expr si env arg2)
-  (emit '(add a pop)))
-
-(define-primitive (fx- si env arg1 arg2)
-  (emit-expr si env arg2)
-  (emit '(push a))
-  (emit-expr si env arg1)
-  (emit '(sub a pop)))
-
-(define-primitive (fx< si env arg1 arg2)
-  (emit-expr si env arg2)
-  (emit `(push a))
-  (emit-expr si env arg1)
-  (emit `(pop b))
-  (emit `(set c ,special/true))
-  (emit `(ife a b))
-  (emit `(set c ,special/false))
-  (emit `(ifg a b))
-  (emit `(set c ,special/false))
-  (emit `(set a c)))
-
-(define-primitive (fx= si env arg1 arg2)
-  (emit-expr si env arg2)
-  (emit `(push a))
-  (emit-expr si env arg1)
-  (emit `(pop b))
-  (emit `(set c ,special/false))
-  (emit `(ife a b))
-  (emit `(set c ,special/true))
-  (emit `(set a c)))
-
 (define (primitive? x)
   (and (symbol? x)
        (hashtable-ref *primitives* x #f)))
 
-(define (emit-primcall si env expr)
+(define (emit-primcall target si env expr tail-position?)
   (let ((prim (car expr))
 	(args (cdr expr)))
-    (apply (primitive-emitter prim) si env args)))
+    (apply (primitive-emitter prim) target si tail-position? env args)))
 
-(define (emit-expr si env expr)
-  (cond ((immediate? expr) (emit-immediate expr))
-	((primcall? expr) (emit-primcall si env expr))
-	((if? expr) (emit-if si env expr))
-	((let? expr) (emit-let si env expr))
+(define (variable-arity? function-name)
+  #f)
+
+(define (take n l)
+  (if (zero? n)
+      '()
+      (cons (car l) (take (- n 1) (cdr l)))))
+
+(define (last lst)
+  (if (null? (cdr lst))
+      (car lst)
+      (last (cdr lst))))
+
+(define +non-tail-position+ #f)
+(define +tail-position+ #t)
+(define +return-value-target+ 'a) ;; register a
+
+(define (emit-call target si env expr tail-position?)
+  (if (variable-arity? (car expr))
+      'todo
+      (let* ((params (cdr expr))
+	     (function (car expr))
+	     (param-count (length params))
+	     (param-places ;; only stack for now, later find out how to use a b c but prevent clobbering while calculating the other parameters 
+	      ;; (take param-count `(a b c ,@(make-list (max 0 (- param-count 3)) 'push)))
+	      (make-list param-count 'push)))
+	(for-each
+	 (lambda (expr target)
+	   (emit-expr target si env expr +non-tail-position+)) 
+	 params
+	 param-places)
+	(if tail-position?
+	    (emit `(jmp ,function))
+	    (begin
+	      (emit `(call ,function))
+	      (emit-set target +return-value-target+))))))
+
+(define (variable? x)
+  (symbol? x))
+
+(define (global-binding? expr env)
+  #t)
+
+(define (local-binding? expr env)
+  (assq expr env))
+
+(define (local-binding-offset expr env)
+  (cdr (assq expr env)))
+
+(define (emit-set target value)
+  (if (eq? target 'push)
+      (emit `(data-push ,value))
+      (emit `(set ,target ,value))))
+
+(define (emit-local-binding-ref target si env expr tail-position?)
+  (let ((binding-offset (local-binding-offset expr env)))
+    (emit-set target `(ref (+ ,+data-stack-register+ ,binding-offset)))))
+
+(define (emit-variable-reference target si env expr tail-position?)
+  (cond ((local-binding? expr env)
+	 (emit-local-binding-ref target si env expr tail-position?))
+	((global-binding? expr env)
+	 (emit-set target expr))
+	(else
+	 (raise-error "unknown binding type: ~a" expr))))
+
+(define (lambda? expr)
+  (and (list? expr)
+       (not (null? expr))
+       (eq? (car expr) 'lambda)
+       (> (length expr) 2)))
+
+(define (zip . lst)
+  (apply map cons lst))
+
+(define (extend-env env params)
+  (zip params
+       (iota (length params))))
+
+(define (emit-lambda target si env expr tail-position?)
+  (let* ((params (cadr expr))
+	 (body (cddr expr))
+	 (env (extend-env env params))) ;; TODO: extend env
+    ;; emit body
+    (emit-expr +return-value-target+ si env (cons 'begin body) +tail-position+)
+    (emit `(ret))))
+
+(define (begin? expr)
+  (and (list? expr)
+       (not (null? expr))
+       (eq? (car expr) 'begin)))
+
+(define (emit-sequence target si env expr tail-position?)
+  (let ((forms (cdr expr)))
+    (for-each 
+     (lambda (expr) (emit-expr target si env expr +non-tail-position+))
+     (take (- (length forms) 1) forms))
+    (emit-expr target si env (last forms) tail-position?)))
+
+(define (emit-expr target si env expr tail-position?)
+  (cond ((immediate? expr) (emit-immediate target expr tail-position?))
+	((primcall? expr) (emit-primcall target si env expr tail-position?))
+	((if? expr) (emit-if target si env expr tail-position?))
+	((lambda? expr) (emit-lambda target si env expr tail-position?))
+	((begin? expr) (emit-sequence target si env expr tail-position?))
+	((call? expr) (emit-call target si env expr tail-position?))
+;;	((let? expr) (emit-let target si env expr))
+	((variable? expr) (emit-variable-reference target si env expr tail-position?))
 	(else (raise-error "unknown expression: ~a" expr))))
 
 
-(define (emit-let si env expr)
-  (let loop ((bindings (let-bindings expr))
-	     (si si)
-	     (new-env env))
-    (cond ((null? bindings)
-	   (emit-expr si new-env (let-body expr)))
-	  (else
-	   (let ((b (car bindings)))
-	     (emit-expr si env (rhs b))
-	     (emit-stack-save si)
-	     (format #t "new binding: ~a ~a~%" (lhs b) si)
-	     (loop (cdr bindings)
-		   (next-stack-index si)
-		   (extend-env new-env (lhs b) si)))))))
+;; (define (emit-let si env expr)
+;;   (let loop ((bindings (let-bindings expr))
+;; 	     (si si)
+;; 	     (new-env env))
+;;     (cond ((null? bindings)
+;; 	   (emit-expr si new-env (let-body expr)))
+;; 	  (else
+;; 	   (let ((b (car bindings)))
+;; 	     (emit-expr si env (rhs b))
+;; 	     (emit-stack-save si)
+;; 	     (format #t "new binding: ~a ~a~%" (lhs b) si)
+;; 	     (loop (cdr bindings)
+;; 		   (next-stack-index si)
+;; 		   (extend-env new-env (lhs b) si)))))))
 
-(define (extend-env env key value)
-  (cons (cons key value) env))
+;; (define (extend-env env key value)
+;;   (cons (cons key value) env))
 
 (define (compile-program form)
   (set! *result* '())
-  (emit-expr (- word-size) '() form)
+  (reset-virtual-registers!)
+  (emit-expr 'a (- word-size) '() form +tail-position+)
   (reverse *result*))
 
-(define (let? expr)
-  (and (list? expr)
-       (eq? (car expr) 'let)))
-(define lhs car)
-(define rhs cadr)
-(define let-bindings cadr)
-(define let-body caddr) ;; TODO: beginify
+;; (define (let? expr)
+;;   (and (list? expr)
+;;        (eq? (car expr) 'let)))
+;; (define lhs car)
+;; (define rhs cadr)
+;; (define let-bindings cadr)
+;; (define let-body caddr) ;; TODO: beginify
+
 (define (next-stack-index si)
   (- si word-size))
 
@@ -139,24 +227,24 @@
       (string->symbol (string-append "label-" (number->string count))))))
 
 ;; these assume z is set correctly
-(define (emit-stack-save si)
-  (emit `(set (ref (+ z ,si)) a)))
+;; (define (emit-stack-save si)
+;;   (emit `(set (ref (+ z ,si)) a)))
 
-(define (emit-stack-load si)
-  (emit `(set a (ref (+ z ,si)))))
+;; (define (emit-stack-load si)
+;;   (emit `(set a (ref (+ z ,si)))))
 
-(define (emit-if si env expr)
+(define (emit-if target si env expr tail-position?)
   (let ((alt-label (unique-label))
-	(end-label (unique-label)))
-    (emit-expr si env (if-test expr))
-    (emit `(ife a ,special/false))
+	(end-label (unique-label))
+	(tmp (new-virtual-register)))
+    (emit-expr tmp si env (if-test expr) +non-tail-position+)
+    (emit `(ife ,tmp ,special/false))
     (emit `(jf ,alt-label))
-    (emit-expr si env (if-conseq expr))
+    (emit-expr target si env (if-conseq expr) tail-position?)
     (emit `(jf ,end-label))
     (emit alt-label)
-    (emit-expr si env (if-altern expr))
-    (emit end-label)
-    ))
+    (emit-expr target si env (if-altern expr) tail-position?)
+    (emit end-label)))
 
 (define (if-test expr)
   (list-ref expr 1))
@@ -168,8 +256,8 @@
 (define (immediate? x)
   (or (number? x) (boolean? x) (null? x) (char? x)))
 
-(define (emit-immediate expr)
-  (emit `(set a ,(immediate-rep expr))))
+(define (emit-immediate target expr tail-position?)
+  (emit-set target (immediate-rep expr)))
 
 (define *result* '())
 
@@ -188,3 +276,50 @@
 	(else
 	 (raise-error "unknown immediate: ~a" x))))
 
+
+
+;; primitives
+
+(define-primitive (fxadd1 target si tail-position? env arg)
+  (emit-expr target si env arg +non-tail-position+)
+  (emit `(add ,target ,(immediate-rep 1))))
+
+(define-primitive (fx+ target si tail-position? env arg1 arg2)
+  (let ((vr-arg1 (new-virtual-register))
+	(vr-arg2 (new-virtual-register)))
+    (emit-expr vr-arg1 si env arg1 +non-tail-position+)
+    (emit-expr vr-arg2 si env arg2 +non-tail-position+)
+    (emit `(add ,vr-arg1 ,vr-arg2))
+    (emit-set target vr-arg1)))
+
+(define-primitive (fx- target si tail-position? env arg1 arg2)
+  (let ((vr-arg1 (new-virtual-register))
+	(vr-arg2 (new-virtual-register)))
+    (emit-expr vr-arg1 si env arg1 +non-tail-position+)
+    (emit-expr vr-arg2 si env arg2 +non-tail-position+)
+    (emit `(sub ,vr-arg1 ,vr-arg2))
+    (emit-set target vr-arg1)))
+
+(define-primitive (fx< target si tail-position? env arg1 arg2)
+  (let ((vr-arg1 (new-virtual-register))
+	(vr-arg2 (new-virtual-register))
+	(vr-res (new-virtual-register)))
+    (emit-expr vr-arg1 si env arg2 +non-tail-position+)
+    (emit-expr vr-arg2 target si env arg1 +non-tail-position+)
+    (emit-set vr-res special/true)
+    (emit `(ife ,vr-arg1 ,vr-arg2))
+    (emit-set vr-res special/false)
+    (emit `(ifg ,vr-arg1 ,vr-arg2))
+    (emit-set vr-res special/false)
+    (emit-set target vr-res)))
+
+(define-primitive (fx= target si tail-position? env arg1 arg2)
+  (let ((vr-arg1 (new-virtual-register))
+	(vr-arg2 (new-virtual-register))
+	(vr-res (new-virtual-register)))
+    (emit-expr vr-arg1 si env arg2 +non-tail-position+)
+    (emit-expr vr-arg2 si env arg1 +non-tail-position+)
+    (emit-set vr-res special/false)
+    (emit `(ife ,vr-arg1 ,vr-arg2))
+    (emit-set vr-res special/true)
+    (emit-set target vr-res)))

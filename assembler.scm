@@ -1,4 +1,12 @@
-;; add jmp, nop
+;; add include, asm syntax (with escape via !, like sassy)
+(define (read-file filename)
+  (with-input-from-file filename
+    (lambda ()
+      (let loop ((next (read))
+		 (result '()))
+	(if (eof-object? next)
+	    (reverse result)
+	    (loop (read) (cons next result)))))))
 
 (define (raise-error . params)
   (error #f (apply format #f params)))
@@ -56,6 +64,7 @@
     (ifb ,(make-opcode 'ifb 'basic #xf 2))		   ;; plus 1 cost if the test fails
     (jsr ,(make-opcode 'jsr 'non-basic #x01 2))))
 
+(define +data-stack-register+ 'j)
 (define +macros+
   `(((nop) (set a a))
     ((jmp target) (set pc target))
@@ -63,7 +72,10 @@
     ((jf target) (add pc (relative target)))
     ((push value) (set push value))
     ((pop target) (set target pop))
+    ((data-push value) (sub ,+data-stack-register+ 1) (set (ref ,+data-stack-register+) value))
+    ((data-pop target) (set target (ref ,+data-stack-register+)) (add ,+data-stack-register+ 1))
     ((call target) (jsr target))
+    ((ret) (set pc pop))
     ((brk) 0)))
 
 (define (find-opcode name)
@@ -90,33 +102,35 @@
       (let* ((op (car instruction))
 	     (macro (find (lambda (x) (eq? (caar x) op)) +macros+)))
 	(if macro
-	    (let ((macro-expansion (cadr macro)))
+	    (let ((macro-expansion (cdr macro)))
 	      (if (null? (cdar macro)) ;; no parameters
 		  macro-expansion
 		  (expand-macro-with-pattern instruction (car macro) macro-expansion)))
 	    instruction))
       instruction))
 
-(define (assemble-one instruction)
-  (let ((instruction (macro-expand instruction)))
-    (cond ((symbol? instruction) ;; label
-	   `(,instruction))
-	  ((and (number? instruction)
-		(not (negative? instruction))
-		(< instruction #x10000)) ;; int
-	   `(,instruction))
-	  ((string? instruction)
-	   (map char->integer (string->list instruction)))
-	  ((pair? instruction)
-	   (let* ((op (car instruction))
-		  (op-data (find-opcode op)))
-	     (if (not op-data)
-		 (raise-error "unknown op code: ~a" op))
-	     (if (eq? 'basic (opcode-type op-data))
-		 (assemble-basic instruction op-data)
-		 (assemble-non-basic instruction op-data))))
-	  (else
-	   (raise-error "unknown instruction: ~a" instruction)))))
+(define (assemble-one orig-instruction)
+  (let ((instruction (macro-expand orig-instruction)))
+    (if (equal? instruction orig-instruction)
+	(cond ((symbol? instruction) ;; label
+	       `(,instruction))
+	      ((and (number? instruction)
+		    (not (negative? instruction))
+		    (< instruction #x10000)) ;; int
+	       `(,instruction))
+	      ((string? instruction)
+	       (map char->integer (string->list instruction)))
+	      ((pair? instruction)
+	       (let* ((op (car instruction))
+		      (op-data (find-opcode op)))
+		 (if (not op-data)
+		     (raise-error "unknown op code: ~a" op))
+		 (if (eq? 'basic (opcode-type op-data))
+		     (assemble-basic instruction op-data)
+		     (assemble-non-basic instruction op-data))))
+	      (else
+	       (raise-error "unknown instruction: ~a" instruction)))
+	(flatten-once (map assemble-one instruction)))))
 
 (define (operand instruction n)
   (if (<= (+ 1 (length instruction)) n)
@@ -201,7 +215,7 @@
   (apply append lst))
 
 (define (assemble lst)
-  (incorporate-labels (fixup-labels   (flatten-once (map assemble-one lst)))))
+  (incorporate-labels (fixup-labels (flatten-once (map assemble-one lst)))))
 
 (define (pa lst)
   (map (lambda (x) (if (number? x) (format #f "~x" x) x)) (assemble lst)))

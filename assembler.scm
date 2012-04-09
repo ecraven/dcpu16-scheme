@@ -124,10 +124,12 @@
 	       (let* ((op (car instruction))
 		      (op-data (find-opcode op)))
 		 (if (not op-data)
-		     (raise-error "unknown op code: ~a" op))
-		 (if (eq? 'basic (opcode-type op-data))
-		     (assemble-basic instruction op-data)
-		     (assemble-non-basic instruction op-data))))
+		     (if (eq? op 'ref)
+			 `(,instruction)
+			 (raise-error "unknown op code: ~a" op))
+		     (if (eq? 'basic (opcode-type op-data))
+			 (assemble-basic instruction op-data)
+			 (assemble-non-basic instruction op-data)))))
 	      (else
 	       (raise-error "unknown instruction: ~a" instruction)))
 	(flatten-once (map assemble-one instruction)))))
@@ -214,6 +216,12 @@
 (define (flatten-once lst)
   (apply append lst))
 
+(define (flatten list)
+  (cond ((null? list) '())
+	((list? (car list)) (append (flatten (car list)) (flatten (cdr list))))
+	(else
+	 (cons (car list) (flatten (cdr list))))))
+
 (define (assemble lst)
   (incorporate-labels (fixup-labels (flatten-once (map assemble-one lst)))))
 
@@ -237,6 +245,9 @@
 			      (if (list-ref (car lst) 3) ;; internal?
 				  0
 				  1))
+			     ((and (list? (car lst))
+				   (eq? (caar lst) 'ref))
+			      1)
 			     (else
 			      (raise-error "unknown item in list: ~a" (car lst)))))))))
 
@@ -275,6 +286,9 @@
 				(set! changes #t)))
 ;			  (format #t "relative jump by ~a (actually: ~a)~%" (abs diff) diff)
 			  (set-car! (cddddr instr) (abs diff))))
+		       ((and (list? instr)
+			     (eq? (car instr) 'ref))
+			'ok)
 		       (else
 			(raise-error "unknown fixup: ~a" instr))))
 	      lst)
@@ -297,8 +311,8 @@
 	(lambda () 
 	  (for-each (lambda (x) (display x) (newline)) (pa lst))))))
 
-(define (incorporate-labels lst)
-  (let loop ((lst lst)
+(define (incorporate-labels forms)
+  (let loop ((lst forms)
 	     (result '()))
     (if (null? lst)
 	(reverse result)
@@ -306,7 +320,8 @@
 	       (loop (cdr lst) (cons (car lst) result)))
 	      ((symbol? (car lst))
 	       (loop (cdr lst) result))
-	      ((list? (car lst))
+	      ((and (list? (car lst))
+		    (memq (caar lst) '(absolute relative)))
 	       (let* ((item (car lst))
 		      (word (list-ref item 2))
 		      (internal (list-ref item 3))
@@ -315,7 +330,13 @@
 		     (begin 
 		       (set-car! result (patch-instruction-immediate (car result) word offset))
 		       (loop (cdr lst) result))
-		     (loop (cdr lst) (cons offset result)))))))))
+		     (loop (cdr lst) (cons offset result)))))
+	      ((and (list? (car lst))
+		    (eq? (caar lst) 'ref))
+	       (let ((label (cadar lst)))
+		 (loop (cdr lst) (cons (label-index forms label) result))))
+	      (else
+	       (raise-error "unknown item: ~a" (car lst)))))))
 
 
 

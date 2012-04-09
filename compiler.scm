@@ -13,9 +13,12 @@ loophole:
 (define (reset-virtual-registers!)
   (set! *first-virtual-register* 0))
 (define *first-virtual-register* 0)
+
+(define-record-type virtual-register (fields number))
+
 (define (new-virtual-register)
   (set! *first-virtual-register* (+ 1 *first-virtual-register*))
-  (string->symbol (format #f "vr-~a" *first-virtual-register*)))
+  (make-virtual-register *first-virtual-register*))
 
 (define fixnum-tag #b00)
 (define fixnum-tag-mask #b11)
@@ -93,23 +96,32 @@ loophole:
 	     (param-count (length params))
 	     (param-places ;; only stack for now, later find out how to use a b c but prevent clobbering while calculating the other parameters 
 	      ;; (take param-count `(a b c ,@(make-list (max 0 (- param-count 3)) 'push)))
-	      (make-list param-count 'push)))
+	      (make-list param-count 'push)
+))
 	(for-each
 	 (lambda (expr target)
 	   (emit-expr target si env expr +non-tail-position+)) 
 	 params
 	 param-places)
+	(let ((jump-target (new-virtual-register)))
+	  (emit-expr jump-target si env function tail-position?)
 	(if tail-position?
-	    (emit `(jmp ,function))
+	    (emit `(jmp ,jump-target))
 	    (begin
-	      (emit `(call ,function))
-	      (emit-set target +return-value-target+))))))
+	      (emit `(call ,jump-target))
+	      (emit-set target +return-value-target+))))
+)))
 
 (define (variable? x)
   (symbol? x))
 
 (define (global-binding? expr env)
-  #t)
+  (let ((bound (hashtable-ref *globals* expr #f)))
+    (if bound
+	#t
+	(begin
+	  (hashtable-set! *globals* expr 'used) ;; enter as used
+	  #t))))
 
 (define (local-binding? expr env)
   (assq expr env))
@@ -126,11 +138,14 @@ loophole:
   (let ((binding-offset (local-binding-offset expr env)))
     (emit-set target `(ref (+ ,+data-stack-register+ ,binding-offset)))))
 
+(define (emit-global-binding-ref target si env expr tail-position?)
+  (emit-set target `(ref ,expr)))
+
 (define (emit-variable-reference target si env expr tail-position?)
   (cond ((local-binding? expr env)
 	 (emit-local-binding-ref target si env expr tail-position?))
 	((global-binding? expr env)
-	 (emit-set target expr))
+	 (emit-global-binding-ref target si env expr tail-position?))
 	(else
 	 (raise-error "unknown binding type: ~a" expr))))
 
@@ -145,7 +160,7 @@ loophole:
 
 (define (extend-env env params)
   (zip params
-       (iota (length params))))
+       (reverse (iota (length params)))))  ;; push left to right, in order to support reduction for varargs
 
 (define (emit-lambda target si env expr tail-position?)
   (let* ((params (cadr expr))
@@ -196,12 +211,146 @@ loophole:
 
 ;; (define (extend-env env key value)
 ;;   (cons (cons key value) env))
+(define (emit-prologue)
+  (emit `(set j #xf800)) ; set data stack pointer
+  )
 
-(define (compile-program form)
+(define (compile-program forms)
   (set! *result* '())
+  (set! *globals* (make-hash-table))
   (reset-virtual-registers!)
-  (emit-expr 'a (- word-size) '() form +tail-position+)
+  (emit-prologue)
+  (for-each (lambda (form) (emit-top-level 'a (- word-size) '() form +tail-position+)) forms)
   (reverse *result*))
+
+(define (emit-top-level target si env expr tail-position?)
+  (cond ((define? expr)
+	 (emit-definition target si env expr tail-position?))
+	(else
+	 (emit-expr target si env expr tail-position?))))
+
+(define (define? expr)
+  (and (list? expr)
+       (> (length expr) 2)
+       (eq? (car expr) 'define)
+       (symbol? (cadr expr))))
+
+(define (add-global-binding! name)
+  (hashtable-set! *globals* name #t))
+
+(define *globals* (make-hash-table))
+
+(define (emit-definition target si env expr tail-position?)
+  (let ((name (cadr expr))
+	(value (caddr expr)))
+    (add-global-binding! name)
+    (if (lambda? value)
+	(let ((end (unique-label))
+	      (start (unique-label)))
+	  (emit `(jmp ,end))
+	  (emit name) ;; label
+	  (emit `(ref ,start))
+	  (emit start)
+	  (emit-expr target si env value tail-position?)
+	  (emit end))
+	(emit-constant target si env name value tail-position?))))
+
+(define general-purpose-registers '(b c i x y z))
+;; a is used for return values, j is used as data stack pointer
+
+(define (make-register-hash-table lst value)
+  (let ((table (make-hash-table)))
+    (for-each (lambda (x) (hashtable-set! table x value))
+	      lst)
+    table))
+
+(define (substitute-registers-in-form form mapping free-registers future-virtual-registers)
+  (let ((result (substitute-registers-in-form-aux form mapping))
+	(vregs-in-form (find-virtual-registers-in-form form)))
+    (for-each (lambda (virtual-register)
+		      (if (not (memq virtual-register future-virtual-registers))
+			  (remove-register-mapping! mapping free-registers virtual-register)))
+		    vregs-in-form)
+    result))
+
+(define (substitute-registers-in-form-aux form mapping)
+  (cond ((virtual-register? form)
+	 (let ((subst (hashtable-ref mapping form #f)))
+	   (if subst
+	       subst
+	       form)))
+	((list? form)
+	 (map (lambda (x) (substitute-registers-in-form-aux x mapping)) form))
+	(else
+	 form)))
+
+(define (allocate-free-register free-registers-table)
+  (let loop ((registers (vector->list (hashtable-keys free-registers-table))))
+    (if (null? registers)
+	(raise-error "no more free registers!")
+	(if (hashtable-ref free-registers-table (car registers) #t)
+	    (begin
+	      (hashtable-set! free-registers-table (car registers) #f)
+	      (car registers))
+	    (loop (cdr registers))))))
+
+(define (add-register-mapping! mapping reg virtual-reg)
+  (hashtable-set! mapping virtual-reg reg))
+
+(define (remove-register-mapping! mapping free-registers-table virtual-register)
+  (let ((register (hashtable-ref mapping virtual-register #f)))
+    (hashtable-delete! mapping virtual-register)
+    (hashtable-set! free-registers-table register #t)))
+
+(define (find-virtual-registers-in-form form)
+  (if (list? form)
+      (let loop ((registers '())
+		 (form form))
+	(remove-duplicates (filter virtual-register? (flatten form))))
+      '()))
+
+(define (remove-duplicates l)
+  (cond ((null? l)
+         '())
+        ((member (car l) (cdr l))
+         (remove-duplicates (cdr l)))
+        (else
+         (cons (car l) (remove-duplicates (cdr l))))))
+
+(define (allocate-registers-in-form form rest free-registers register-mapping)
+  (if (list? form)
+      (let* ((virtual-registers (find-virtual-registers-in-form form))
+	     (regs (map (lambda (x) (add-register-mapping! register-mapping (allocate-free-register free-registers) x)) virtual-registers)))
+	(let* ((future-vregs (remove-duplicates (apply append (map find-virtual-registers-in-form rest))))
+	       (result (substitute-registers-in-form form register-mapping free-registers future-vregs)))
+	  (for-each (lambda (virtual-register)
+		      (if (not (memq virtual-register future-vregs))
+			  (remove-register-mapping! register-mapping free-registers virtual-register)))
+		    virtual-registers)
+	  result))
+      form))
+
+;; primitive first try
+(define (allocate-registers forms)
+  (let loop ((free-registers (make-register-hash-table general-purpose-registers #t))
+	     (forms forms)
+	     (register-mapping (make-hash-table))
+	     (result '()))
+    (if (null? forms)
+	(reverse result)
+	(let* ((future-vregs (remove-duplicates (apply append (map find-virtual-registers-in-form (cdr forms)))))
+	       (form (substitute-registers-in-form (car forms) register-mapping free-registers future-vregs))) ;; substitute known substitutions
+	  (loop free-registers 
+		(cdr forms)
+		register-mapping 
+		(cons (allocate-registers-in-form form forms free-registers register-mapping) result))))))
+
+(define (emit-constant target si env name expr tail-position?)
+  (let ((end (unique-label)))
+    (emit `(jmp ,end))
+    (emit name)
+    (emit (immediate-rep expr))
+    (emit end)))
 
 ;; (define (let? expr)
 ;;   (and (list? expr)
@@ -290,6 +439,17 @@ loophole:
     (emit-expr vr-arg1 si env arg1 +non-tail-position+)
     (emit-expr vr-arg2 si env arg2 +non-tail-position+)
     (emit `(add ,vr-arg1 ,vr-arg2))
+    (emit-set target vr-arg1)))
+
+(define-primitive (fx* target si tail-position? env arg1 arg2)
+  (let ((vr-arg1 (new-virtual-register))
+	(vr-arg2 (new-virtual-register)))
+    (emit-expr vr-arg1 si env arg1 +non-tail-position+)
+    (emit-expr vr-arg2 si env arg2 +non-tail-position+)
+    (emit `(shr ,vr-arg1 2))
+    (emit `(shr ,vr-arg2 2))
+    (emit `(mul ,vr-arg1 ,vr-arg2))
+    (emit `(shl ,vr-arg1 2))
     (emit-set target vr-arg1)))
 
 (define-primitive (fx- target si tail-position? env arg1 arg2)

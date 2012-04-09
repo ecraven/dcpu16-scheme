@@ -67,6 +67,8 @@
 (define +data-stack-register+ 'j)
 (define +macros+
   `(((nop) (set a a))
+    ((push-gprs) (push b) (push c) (push i) (push x) (push y) (push z))
+    ((pop-gprs) (pop z) (pop y) (pop x) (pop i) (pop c) (pop b))
     ((jmp target) (set pc target))
     ((jb target) (sub pc (relative target)))
     ((jf target) (add pc (relative target)))

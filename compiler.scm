@@ -7,6 +7,12 @@ loophole:
 ;;; the following register *must* match assembler.scm!
 (define +data-stack-register+ 'j)
 
+(define (flatten list)
+  (cond ((null? list) '())
+	((list? (car list)) (append (flatten (car list)) (flatten (cdr list))))
+	(else
+	 (cons (car list) (flatten (cdr list))))))
+
 (define (raise-error . params)
   (error #f (apply format #f params)))
 
@@ -100,7 +106,9 @@ loophole:
 ))
 	(for-each
 	 (lambda (expr target)
-	   (emit-expr target si env expr +non-tail-position+)) 
+	   (emit-expr target si env expr +non-tail-position+)
+	   ;; TODO: thread env through all functions :( 
+	   (set! env (extend-env env (list (list target)))))
 	 params
 	 param-places)
 	(let ((jump-target (new-virtual-register)))
@@ -108,9 +116,11 @@ loophole:
 	(if tail-position?
 	    (emit `(jmp ,jump-target))
 	    (begin
+	      (emit `(push-gprs))
 	      (emit `(call ,jump-target))
-	      (emit-set target +return-value-target+))))
-)))
+	      (emit `(pop-gprs))
+	      (emit `(sub j ,(length params))) ;; remove params from stack
+	      (emit-set target +return-value-target+)))))))
 
 (define (variable? x)
   (symbol? x))
@@ -124,10 +134,23 @@ loophole:
 	  #t))))
 
 (define (local-binding? expr env)
-  (assq expr env))
+  ;(assq expr env)
+  (memq expr env)
+  )
 
 (define (local-binding-offset expr env)
-  (cdr (assq expr env)))
+  ;(cdr (assq expr env))
+  (position expr env)
+  )
+
+(define (position x lst)
+  (define (pos-aux x lst n)
+    (if (null? lst)
+	#f
+	(if (eq? (car lst) x)
+	    n
+	    (pos-aux x (cdr lst) (+ n 1)))))
+  (pos-aux x lst 0))
 
 (define (emit-set target value)
   (if (eq? target 'push)
@@ -159,8 +182,10 @@ loophole:
   (apply map cons lst))
 
 (define (extend-env env params)
-  (zip params
-       (reverse (iota (length params)))))  ;; push left to right, in order to support reduction for varargs
+  (append (reverse params) env)
+  ;; (zip params
+  ;;      (reverse (iota (length params))))
+  )  ;; push left to right, in order to support reduction for varargs
 
 (define (emit-lambda target si env expr tail-position?)
   (let* ((params (cadr expr))
@@ -221,7 +246,7 @@ loophole:
   (reset-virtual-registers!)
   (emit-prologue)
   (for-each (lambda (form) (emit-top-level 'a (- word-size) '() form +tail-position+)) forms)
-  (reverse *result*))
+  (allocate-registers (reverse *result*)))
 
 (define (emit-top-level target si env expr tail-position?)
   (cond ((define? expr)
@@ -434,6 +459,12 @@ loophole:
   (emit `(add ,target ,(immediate-rep 1))))
 
 (define-primitive (fx+ target si tail-position? env arg1 arg2)
+  ;; put immediate last to avoid clobbering
+  (if (and (immediate? arg1)
+	   (not (immediate? arg2)))
+      (let ((tmp arg1))
+	(set! arg1 arg2)
+	(set! arg2 tmp)))
   (let ((vr-arg1 (new-virtual-register))
 	(vr-arg2 (new-virtual-register)))
     (emit-expr vr-arg1 si env arg1 +non-tail-position+)
@@ -442,6 +473,12 @@ loophole:
     (emit-set target vr-arg1)))
 
 (define-primitive (fx* target si tail-position? env arg1 arg2)
+  ;; put immediate last to avoid clobbering
+  (if (and (immediate? arg1)
+	   (not (immediate? arg2)))
+      (let ((tmp arg1))
+	(set! arg1 arg2)
+	(set! arg2 tmp)))
   (let ((vr-arg1 (new-virtual-register))
 	(vr-arg2 (new-virtual-register)))
     (emit-expr vr-arg1 si env arg1 +non-tail-position+)
@@ -483,3 +520,7 @@ loophole:
     (emit `(ife ,vr-arg1 ,vr-arg2))
     (emit-set vr-res special/true)
     (emit-set target vr-res)))
+
+(compile-program '((define fac-rec (lambda (n) (if (fx= n 1) 1 (fx* n (fac-rec (fx- n 1)))))) (fac-rec 5)))
+(compile-program '((define fac-iter (lambda (n r) (if (fx= n 1) r (fac-iter (fx- n 1) (fx* r n))))) (fac-iter 5 1)))
+(compile-program '((define test (lambda (n) (fx= (fac-rec n) (fac-iter n 1)))) (test 5)))
